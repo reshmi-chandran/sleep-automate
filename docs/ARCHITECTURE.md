@@ -54,6 +54,60 @@ Todoist doesn’t offer a “day ends at 10 AM” setting. The deliverable is an
 
 **Flow in plain language:** The user completes or updates a task in any official Todoist client. Todoist saves the change and, for subscribed events, sends a **signed** webhook to the integration service. The service validates the call, queues work, loads fresh task state when needed, applies **logical-day and recurrence rules**, and sends **updates to Todoist** only when a correction is required. A **scheduled job** repeats a lighter version of the same checks so a missed webhook or delayed sync does not leave a wrong next due date in place.
 
+### Solution diagram (architecture)
+
+The diagram below matches the paragraph above: **Todoist notifies the integration service**, the service **evaluates** using the 10 AM logical-day rules, then **writes back** through the API only when the next occurrence is wrong. **Scheduled jobs** cover missed webhooks or late sync.
+
+*Viewing tip:* Mermaid diagrams render on **GitHub**, **GitLab**, **Notion**, and in **VS Code** with a Mermaid preview extension. If your viewer shows only the text source, open the file on GitHub or use a Mermaid-compatible export.
+
+```mermaid
+flowchart TB
+  subgraph clients[User devices]
+    Apps[Todoist apps — phone, desktop, web]
+  end
+
+  subgraph todoist[Todoist cloud]
+    TD[(Tasks, recurrence, completions)]
+  end
+
+  subgraph service[Integration service — always on]
+    WH[Webhook receiver — verify signature]
+    Q[Queue and worker — retries, order per task]
+    R[Rule engine — grace window and logical day]
+    API[REST and Sync client]
+    Store[(Idempotency and checkpoints)]
+    SCH[Scheduled jobs — periodic + after 10 AM local]
+  end
+
+  Apps --> TD
+  TD -->|"HTTPS: task completed (signed)"| WH
+  WH --> Q
+  SCH --> Q
+  Q --> R
+  R <--> Store
+  R -->|"if next due does not match rules"| API
+  API <-->|"read state / apply correction"| TD
+```
+
+### Processing diagram (decision flow)
+
+What happens **inside** the rules for a recurring task after completion:
+
+```mermaid
+flowchart TD
+  START([Completion event or reconciliation job]) --> TZ[Convert time to configured timezone]
+  TZ --> GW{Local time between midnight and 10 AM?}
+  GW -->|No| SKIP[Leave Todoist state unchanged for this rule]
+  GW -->|Yes| LOAD[Load task due and recurrence from Todoist]
+  LOAD --> EXP[Compute expected next due using logical day]
+  EXP --> CMP{Matches Todoist actual next due?}
+  CMP -->|Yes| OK[No update needed]
+  CMP -->|No| FIX[Send Sync update — fix next due, keep wall-clock time / meaning]
+  FIX --> DONE([Done])
+  OK --> DONE
+  SKIP --> DONE
+```
+
 ### 2. Main components
 
 | Component | Role |
