@@ -112,7 +112,7 @@ flowchart TD
 
 | Component | Role |
 |-----------|------|
-| **HTTPS webhook endpoint** | Receives Todoist callbacks; verifies signatures; responds quickly (usually by enqueueing work, not doing heavy Sync calls in the HTTP thread). |
+| **HTTPS webhook endpoint** | Receives Todoist callbacks when using **webhook mode**; verifies signatures; responds quickly (usually by enqueueing work). **Not required** in **polling-only** mode. |
 | **Queue + worker** | Processes jobs with retries, backoff, and **per-task ordering** so rapid edits don’t interleave incorrectly. |
 | **Rule engine** | Pure logic: given completion time (UTC), configured timezone, boundary time, and task metadata (recurrence, dues), decides if a correction is needed and what the target state should be. |
 | **Todoist API client** | Handles authenticated REST reads and Sync command batches, rate limits, and transient errors. |
@@ -120,7 +120,23 @@ flowchart TD
 | **Scheduler** | Periodically reconciles, plus a run shortly **after 10:00 AM** in the configured timezone. |
 | **Observability** | Logs, a health URL for uptime checks, optional alerts if corrections keep failing. |
 
-The implementation is not tied to a single cloud vendor; requirements are **HTTPS**, **background workers**, **cron**, and a small database or queue store.
+The implementation is not tied to a single cloud vendor. **Minimum technical requirements** are: a process that can run **on a schedule** and hold **HTTPS** for webhooks **or** run **polling** instead; **persistent disk** (even a single **SQLite** file) for idempotency and checkpoints; and **background** work (queue or inline with careful timeouts).
+
+### 2a. Same app, three ways to run it (cost vs. simplicity)
+
+The **logic is identical**; only **where** it runs changes monthly cost and setup steps.
+
+| Approach | Typical monthly cost | Setup effort | Best when |
+|----------|---------------------|--------------|-----------|
+| **A. Local PC + free HTTPS tunnel** | **$0** (tunnel) + existing PC | One-time: install service, install tunnel, register webhook URL in Todoist | You want **no cloud bill** and are fine with a **home Windows/Mac** machine that stays on or sleeps briefly |
+| **B. Local PC + polling only (no inbound HTTPS)** | **$0** | Easiest network story: **no** tunnel; jobs poll Todoist on a timer | You want **minimum moving parts**; a few minutes’ delay on corrections is OK |
+| **C. Small VPS / PaaS** | Often **~$0–7**/mo depending on provider | Point DNS or use provider URL; register webhook | PC is **often off** and you still want **near–real-time** webhooks without tunnels |
+
+**Option A detail — local + tunnel:** The integration binds to `localhost`; a **Cloudflare Tunnel**, **ngrok**, or similar exposes **HTTPS** so Todoist can POST webhooks. Free tiers sometimes **rotate URLs**—if that happens, update the webhook URL once in the Todoist developer app (documented in setup). **Autostart:** Windows **Task Scheduler** (“at startup”) or macOS **Launch Agent** so nobody runs a script daily.
+
+**Option B detail — polling only:** Todoist calls **outbound** only from your network (no public server). The scheduler runs every **2–5 minutes** (tuned to rate limits), fetches **recent completions**, and runs the same rule engine. **Tradeoff:** corrections are **not instant**; **tradeoff benefit:** no tunnel account, no inbound firewall, easiest “download and run” story.
+
+**Option C detail:** A **single small VM** or low-tier **PaaS** replaces always-on home hardware. This is the usual answer when the machine sleeps all night and you still want webhooks.
 
 ### 3. Authentication and one-time Todoist setup
 
@@ -262,9 +278,13 @@ Typical sequence: development → **test project** → production, optionally **
 
 ## Summary of the approach
 
-The design is a **small, always-on service**: **webhooks** for speed, **Sync API** for precise recurrence fixes, **scheduled reconciliation** for reliability, and **idempotency** so retries are safe.
+The design is a **small service** (webhooks **or** polling): **Sync API** for precise recurrence fixes, **scheduled reconciliation** for reliability, and **idempotency** so retries are safe.
 
-**Cloud hosting** is recommended: it avoids depending on a PC being on or on scripts run by hand. A **local-only** fallback is possible but **less reliable** for webhooks and machine sleep.
+**Choosing a home for it:**
+
+- **Lowest recurring cost / no cloud bill:** run on a **Windows or Mac PC** with **SQLite**, **autostart**, and either a **free HTTPS tunnel** (Option A) or **polling-only** (Option B). No mandatory AWS/GCP/Azure spend.
+- **Best reliability when the PC is often asleep or off:** a **small VPS or low-cost PaaS** (Option C) so webhooks always land; same codebase, different host.
+- In all cases, the user should **not** need daily manual steps once install is done.
 
 **API validation:** a short test-account pass using **real** recurrence patterns makes the correction strategy evidence-based, not theoretical.
 
@@ -298,6 +318,7 @@ Under normal conditions, corrections within **a few minutes** of a completion. O
 - **Shared projects:** policy should state whether only the **account owner’s** completions are adjusted.
 - **Offline devices** cause delay until sync—reconciliation covers that gap.
 - **APIs evolve**—ongoing maintenance (if engaged) includes watching Todoist developer notes.
+- **Local + free tunnel:** tunnel URLs on free tiers may **change**; the Todoist webhook URL must be **updated** when that happens (paid tunnel tiers or a small VPS avoid this).
 
 ---
 
@@ -309,15 +330,20 @@ Least-privilege access, verified webhooks, minimal sensitive data in logs (prefe
 
 ## Deliverables
 
-- **Working service** — deployed integration, webhook configured, scheduler, small store for dedupe/checkpoints.
-- **Setup guides** — step-by-step for **Windows** and **Mac** where relevant; for a hosted setup, that usually means **authorize Todoist once**, paste the webhook URL, set timezone—not “run a script every morning.”
+- **Working service** — integration runnable **locally** (tunnel or polling) and/or on a **small host**; webhook or polling configured; scheduler; **SQLite** or equivalent for dedupe/checkpoints.
+- **Setup guides** — step-by-step for **Windows** and **Mac**: autostart, optional tunnel, Todoist app + webhook URL **or** polling mode; **authorize Todoist once**, set timezone—not “run a script every morning.”
 - **Documentation** — approach (like this), setup, limitations, troubleshooting.
 
 ---
 
-## Local-only option
+## Local and low-cost option (details)
 
-A daemon on the user’s machine plus HTTPS tunneling, or polling instead of webhooks. Feasible but **weaker** when the machine sleeps; reconciliation after wake carries more load. **Cloud hosting remains the recommended default** for accessibility and reliability.
+This is the **default path for “easy to execute” and $0 cloud**: run the service on the **user’s machine** (see **§2a** in Technical solution).
+
+- **Polling-only** minimizes setup (no tunnel, no public URL); rely on **frequent reconciliation** instead of instant webhooks.
+- **Tunnel + webhooks** keeps near–real-time behavior without paying for a server, at the cost of one extra component and occasional URL updates on free tunnel tiers.
+
+If the **PC sleeps overnight**, missed webhooks are recovered when the **scheduler** runs after wake and at **post–10 AM** local; for heavy sleep/use patterns, **Option C (tiny VPS)** is the more predictable choice.
 
 ---
 
@@ -329,7 +355,7 @@ Periodic review of Todoist API / webhook changes, dependency updates, and tuning
 
 ## Effort and timeline
 
-**Target: 40 hours** for an **MVP**: single account, **in-use** recurrence patterns, hosted **happy path**, without large add-ons (deep shared-project policy, multi-timezone travel logic, exhaustive edge-case polish). A second phase can cover deferred items.
+**Target: 40 hours** for an **MVP**: single account, **in-use** recurrence patterns, **production path on local + polling or local + tunnel** (or small host if you prefer), without large add-ons (deep shared-project policy, multi-timezone travel logic, exhaustive edge-case polish). A second phase can cover deferred items.
 
 The **40 hours** include a **Todoist test account** and hands-on API validation, time-boxed within that budget.
 
